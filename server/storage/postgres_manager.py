@@ -340,14 +340,16 @@ class PostgreSQLManager:
                     await conn.execute(
                         f"""
                         INSERT INTO {self.schema}.samples
-                            (journey_id, lat, lon, speed_kmh, ts)
-                        VALUES ($1::uuid, $2, $3, $4, $5)
+                            (journey_id, lat, lon, speed_kmh, ts, eta_min, remaining_km)
+                        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
                         """,
                         journey_id,
                         float(lat),
                         float(lon),
                         s.get("speed_kmh"),
                         ts,
+                        s.get("eta_min"),
+                        s.get("remaining_km"),
                     )
                     inserted += 1
         return inserted

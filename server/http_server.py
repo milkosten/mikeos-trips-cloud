@@ -80,6 +80,9 @@ class SampleIn(BaseModel):
     lat: float
     lon: float
     speed_kmh: Optional[float] = None
+    # The app's live estimate at this sample — logged for later ETA-model analysis.
+    eta_min: Optional[float] = None
+    remaining_km: Optional[float] = None
     # Accept an ISO-8601 string OR epoch millis/seconds (parsed tolerantly).
     ts: Optional[Union[str, int, float]] = None
 
