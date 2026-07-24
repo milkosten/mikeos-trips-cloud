@@ -45,6 +45,9 @@ VERSION = "1.0.0"
 
 # Free, keyless public OSRM demo server. No paid API.
 OSRM_BASE = os.environ.get("OSRM_BASE_URL", "https://router.project-osrm.org")
+# Bearer token for a gated OSRM (e.g. our self-hosted mikeos-osm at osm.osmike.com/route). Empty =
+# no auth header (public demo). Set OSRM_BASE_URL + OSRM_TOKEN together at the routing cutover.
+OSRM_TOKEN = os.environ.get("OSRM_TOKEN", "")
 
 
 # ---------------------------------------------------------------------------
@@ -204,9 +207,10 @@ async def route(body: RouteIn) -> Dict[str, Any]:
         f"{frm.lon},{frm.lat};{to.lon},{to.lat}"
         "?overview=full&geometries=polyline&steps=true"
     )
+    headers = {"Authorization": f"Bearer {OSRM_TOKEN}"} if OSRM_TOKEN else {}
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
-            resp = await client.get(url)
+            resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
             return {"ok": False, "error": f"osrm http {resp.status_code}"}
         data = resp.json()
