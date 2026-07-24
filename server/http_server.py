@@ -215,6 +215,7 @@ async def route(body: RouteIn) -> Dict[str, Any]:
                     "modifier": man.get("modifier"),
                     "name": st.get("name") or "",
                     "distance_m": round(st.get("distance") or 0.0, 1),
+                    "duration_s": round(st.get("duration") or 0.0, 1),
                     "lat": loc[1] if len(loc) > 1 else None,
                     "lon": loc[0] if len(loc) > 0 else None,
                 })
