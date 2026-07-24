@@ -354,6 +354,31 @@ class PostgreSQLManager:
                     inserted += 1
         return inserted
 
+    async def add_search(self, user_id: str, s: Dict[str, Any]) -> Optional[int]:
+        """Insert one destination-search log row. Returns the new id (never-trust-200)."""
+        pool = await self.get_connection()
+        ts = _parse_ts(s.get("ts")) or datetime.now(tz=timezone.utc)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                INSERT INTO {self.schema}.searches
+                    (user_id, query, results, chosen_label, chosen_lat, chosen_lon,
+                     near_lat, near_lon, ts)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                RETURNING id
+                """,
+                user_id,
+                (s.get("query") or "")[:500],
+                s.get("results"),
+                s.get("chosen_label"),
+                s.get("chosen_lat"),
+                s.get("chosen_lon"),
+                s.get("near_lat"),
+                s.get("near_lon"),
+                ts,
+            )
+            return row["id"] if row else None
+
     # =========================================================================
     # Congestion model
     # =========================================================================

@@ -95,6 +95,17 @@ class EndIn(BaseModel):
     avg_kmh: Optional[float] = None
 
 
+class SearchIn(BaseModel):
+    query: str
+    results: Optional[int] = None
+    chosen_label: Optional[str] = None
+    chosen_lat: Optional[float] = None
+    chosen_lon: Optional[float] = None
+    near_lat: Optional[float] = None
+    near_lon: Optional[float] = None
+    ts: Optional[Union[str, int, float]] = None
+
+
 # ---------------------------------------------------------------------------
 # Auth dependency: resolve X-API-KEY -> user_id
 # ---------------------------------------------------------------------------
@@ -263,6 +274,17 @@ async def add_samples(
     if stored < 0:
         raise HTTPException(status_code=404, detail="Trip not found")
     return {"stored": stored}
+
+
+@app.post("/api/searches")
+async def log_search(
+    body: SearchIn,
+    user_id: str = Depends(current_user_id),
+) -> Dict[str, Any]:
+    """Log a destination search (query + result count + chosen place + where the user was)."""
+    db = await get_postgres_manager()
+    sid = await db.add_search(user_id, body.model_dump(exclude_none=False))
+    return {"ok": True, "id": sid}
 
 
 @app.post("/api/trips/{trip_id}/end")
