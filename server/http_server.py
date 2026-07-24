@@ -188,7 +188,7 @@ async def route(body: RouteIn) -> Dict[str, Any]:
     url = (
         f"{OSRM_BASE}/route/v1/driving/"
         f"{frm.lon},{frm.lat};{to.lon},{to.lat}"
-        "?overview=full&geometries=polyline&steps=false"
+        "?overview=full&geometries=polyline&steps=true"
     )
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
@@ -200,11 +200,27 @@ async def route(body: RouteIn) -> Dict[str, Any]:
         if not routes:
             return {"ok": False, "error": data.get("message") or "no route"}
         r0 = routes[0]
+        # Turn-by-turn maneuvers (OSRM legs[].steps[]). Flattened + defensive so a missing
+        # field never breaks the response. The app builds the instruction text from type/modifier.
+        steps_out = []
+        for leg in (r0.get("legs") or []):
+            for st in (leg.get("steps") or []):
+                man = st.get("maneuver") or {}
+                loc = man.get("location") or []
+                steps_out.append({
+                    "type": man.get("type"),
+                    "modifier": man.get("modifier"),
+                    "name": st.get("name") or "",
+                    "distance_m": round(st.get("distance") or 0.0, 1),
+                    "lat": loc[1] if len(loc) > 1 else None,
+                    "lon": loc[0] if len(loc) > 0 else None,
+                })
         return {
             "ok": True,
             "polyline": r0.get("geometry"),
             "km": round((r0.get("distance") or 0) / 1000.0, 2),
             "eta_min": round((r0.get("duration") or 0) / 60.0, 1),
+            "steps": steps_out,
         }
     except Exception as e:
         logger.warning("OSRM route failed: %s", e)
