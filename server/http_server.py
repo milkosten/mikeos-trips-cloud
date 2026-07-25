@@ -109,6 +109,23 @@ class SearchIn(BaseModel):
     ts: Optional[Union[str, int, float]] = None
 
 
+class InteractionIn(BaseModel):
+    # A single map interaction. `type` is 'tap' | 'move'; `detail` is 'poi' | 'empty' for taps.
+    type: str
+    detail: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    zoom: Optional[float] = None
+    bearing: Optional[float] = None
+    feature_name: Optional[str] = None
+    ts: Optional[Union[str, int, float]] = None
+
+
+class InteractionsIn(BaseModel):
+    events: List[InteractionIn]
+    device_id: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Auth dependency: resolve X-API-KEY -> user_id
 # ---------------------------------------------------------------------------
@@ -289,6 +306,22 @@ async def log_search(
     db = await get_postgres_manager()
     sid = await db.add_search(user_id, body.model_dump(exclude_none=False))
     return {"ok": True, "id": sid}
+
+
+@app.post("/api/interactions")
+async def log_interactions(
+    body: InteractionsIn,
+    user_id: str = Depends(current_user_id),
+) -> Dict[str, Any]:
+    """Batch-log map interactions (taps + pans/zooms). `ts` parsed tolerantly (ISO-8601 or epoch).
+
+    Returns {stored: N} with the REAL rows inserted (never-trust-200). Best-effort analytics — the
+    app fires these in the background; this endpoint must stay cheap and never 500.
+    """
+    db = await get_postgres_manager()
+    items = [e.model_dump(exclude_none=False) for e in body.events]
+    stored = await db.add_interactions(user_id, body.device_id, items)
+    return {"stored": stored}
 
 
 @app.post("/api/trips/{trip_id}/end")

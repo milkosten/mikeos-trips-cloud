@@ -379,6 +379,48 @@ class PostgreSQLManager:
             )
             return row["id"] if row else None
 
+    async def add_interactions(
+        self, user_id: str, device_id: Optional[str], events: List[Dict[str, Any]]
+    ) -> int:
+        """Batch-insert map interaction rows (taps + pans/zooms).
+
+        Returns the REAL number of rows inserted (never-trust-200). An unparseable ts falls back to
+        now(); over-long labels are truncated. Best-effort analytics — one bad row is skipped, not fatal.
+        """
+        if not events:
+            return 0
+        pool = await self.get_connection()
+        inserted = 0
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for e in events:
+                    kind = (e.get("type") or "").strip()[:32]
+                    if not kind:
+                        continue
+                    fname = e.get("feature_name")
+                    if fname is not None:
+                        fname = str(fname)[:200]
+                    ts = _parse_ts(e.get("ts")) or datetime.now(tz=timezone.utc)
+                    await conn.execute(
+                        f"""
+                        INSERT INTO {self.schema}.interactions
+                            (user_id, device_id, kind, detail, lat, lon, zoom, bearing, feature_name, ts)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        """,
+                        user_id,
+                        device_id,
+                        kind,
+                        (e.get("detail") or None),
+                        e.get("lat"),
+                        e.get("lon"),
+                        e.get("zoom"),
+                        e.get("bearing"),
+                        fname,
+                        ts,
+                    )
+                    inserted += 1
+        return inserted
+
     # =========================================================================
     # Congestion model
     # =========================================================================
