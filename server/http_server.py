@@ -49,6 +49,128 @@ OSRM_BASE = os.environ.get("OSRM_BASE_URL", "https://router.project-osrm.org")
 # no auth header (public demo). Set OSRM_BASE_URL + OSRM_TOKEN together at the routing cutover.
 OSRM_TOKEN = os.environ.get("OSRM_TOKEN", "")
 
+# Our self-hosted Valhalla (planet, on the 242 box) — the PRIMARY router now. Richer turn-by-turn
+# (real street-name maneuvers) and it's ours (no OSRM-demo ToS/rate limits). OSRM stays as a fallback.
+VALHALLA_URL = os.environ.get("VALHALLA_URL", "https://route.osmike.com")
+VALHALLA_TOKEN = os.environ.get("VALHALLA_TOKEN", "")
+
+# ---- polyline codec: Valhalla emits precision-6 shapes; the app decodes precision-5 (OSRM) ----------
+def _decode_polyline(s: str, precision: int = 6):
+    factor = 10 ** precision
+    index = lat = lng = 0
+    coords = []
+    while index < len(s):
+        for is_lat in (True, False):
+            shift = result = 0
+            while True:
+                b = ord(s[index]) - 63
+                index += 1
+                result |= (b & 0x1f) << shift
+                shift += 5
+                if b < 0x20:
+                    break
+            d = ~(result >> 1) if (result & 1) else (result >> 1)
+            if is_lat:
+                lat += d
+            else:
+                lng += d
+        coords.append((lat / factor, lng / factor))
+    return coords
+
+
+def _encode_polyline(coords, precision: int = 5) -> str:
+    factor = 10 ** precision
+    out = []
+    plat = plng = 0
+
+    def _enc(v: int) -> str:
+        v = (v << 1) if v >= 0 else ~(v << 1)
+        s = ""
+        while v >= 0x20:
+            s += chr((0x20 | (v & 0x1f)) + 63)
+            v >>= 5
+        return s + chr(v + 63)
+
+    for lat, lng in coords:
+        ilat = round(lat * factor)
+        ilng = round(lng * factor)
+        out.append(_enc(ilat - plat))
+        out.append(_enc(ilng - plng))
+        plat, plng = ilat, ilng
+    return "".join(out)
+
+
+# Valhalla maneuver.type (int enum) -> the app's OSRM-style (type, modifier). Unknown -> continue.
+_VALHALLA_MANEUVER = {
+    0: ("continue", "straight"),
+    1: ("depart", None), 2: ("depart", "right"), 3: ("depart", "left"),
+    4: ("arrive", None), 5: ("arrive", "right"), 6: ("arrive", "left"),
+    7: ("new name", "straight"), 8: ("continue", "straight"),
+    9: ("turn", "slight right"), 10: ("turn", "right"), 11: ("turn", "sharp right"),
+    12: ("turn", "uturn"), 13: ("turn", "uturn"),
+    14: ("turn", "sharp left"), 15: ("turn", "left"), 16: ("turn", "slight left"),
+    17: ("on ramp", "straight"), 18: ("on ramp", "right"), 19: ("on ramp", "left"),
+    20: ("off ramp", "right"), 21: ("off ramp", "left"),
+    22: ("continue", "straight"), 23: ("fork", "right"), 24: ("fork", "left"),
+    25: ("merge", "straight"),
+    26: ("roundabout", None), 27: ("exit roundabout", None),
+    28: ("continue", "straight"), 29: ("continue", "straight"),
+}
+
+
+async def _route_via_valhalla(frm, to):
+    """Our Valhalla → the app's {ok,polyline(p5),km,eta_min,steps} shape. Returns None on any failure."""
+    if not VALHALLA_URL:
+        return None
+    payload = {
+        "locations": [{"lat": frm.lat, "lon": frm.lon}, {"lat": to.lat, "lon": to.lon}],
+        "costing": "auto",
+        "directions_options": {"units": "kilometers"},
+    }
+    headers = {"Authorization": f"Bearer {VALHALLA_TOKEN}"} if VALHALLA_TOKEN else {}
+    try:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            resp = await client.post(f"{VALHALLA_URL}/route", json=payload, headers=headers)
+        if resp.status_code != 200:
+            return None
+        trip = (resp.json() or {}).get("trip") or {}
+        legs = trip.get("legs") or []
+        if not legs:
+            return None
+        # one combined shape + maneuvers across legs (single leg for A→B, but be general)
+        coords = []
+        steps_out = []
+        for leg in legs:
+            leg_coords = _decode_polyline(leg.get("shape") or "", 6)
+            base = len(coords)
+            coords.extend(leg_coords)
+            for man in (leg.get("maneuvers") or []):
+                typ, mod = _VALHALLA_MANEUVER.get(man.get("type"), ("continue", "straight"))
+                bi = base + (man.get("begin_shape_index") or 0)
+                loc = coords[bi] if 0 <= bi < len(coords) else (None, None)
+                names = man.get("street_names") or man.get("begin_street_names") or []
+                steps_out.append({
+                    "type": typ,
+                    "modifier": mod,
+                    "name": names[0] if names else "",
+                    "distance_m": round((man.get("length") or 0.0) * 1000.0, 1),
+                    "duration_s": round(man.get("time") or 0.0, 1),
+                    "lat": loc[0],
+                    "lon": loc[1],
+                })
+        summary = trip.get("summary") or {}
+        return {
+            "ok": True,
+            "polyline": _encode_polyline(coords, 5),
+            "km": round(summary.get("length") or 0.0, 2),
+            "eta_min": round((summary.get("time") or 0.0) / 60.0, 1),
+            "steps": steps_out,
+            "router": "valhalla",
+        }
+    except Exception as e:
+        logger.warning("Valhalla route failed (falling back to OSRM): %s", e)
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Models
@@ -212,13 +334,19 @@ async def health():
 # ---------------------------------------------------------------------------
 @app.post("/api/route")
 async def route(body: RouteIn) -> Dict[str, Any]:
-    """Proxy OSRM for a driving route. Best-effort: never raises 500.
+    """Driving route. Best-effort: never raises 500.
 
-    Returns {polyline, km, eta_min, ok:true} on success, or {ok:false, error}
-    on any OSRM non-200 / timeout / malformed response.
+    PRIMARY: our self-hosted Valhalla (planet, real street-name maneuvers, ours). FALLBACK: OSRM
+    (public demo unless OSRM_BASE_URL is set) if Valhalla is unavailable — routing can't go dark.
+    Returns {polyline(precision-5), km, eta_min, steps, ok:true} on success.
     """
     frm = body.from_
     to = body.to
+
+    valhalla = await _route_via_valhalla(frm, to)
+    if valhalla is not None and valhalla.get("polyline"):
+        return valhalla
+
     url = (
         f"{OSRM_BASE}/route/v1/driving/"
         f"{frm.lon},{frm.lat};{to.lon},{to.lat}"
