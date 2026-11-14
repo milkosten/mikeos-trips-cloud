@@ -1,0 +1,53 @@
+# mikeos-trips-cloud on 242 (moved off Railway 2026-11-14).
+# App + its OWN Postgres, data on the RAID6 (/data/mikeos-trips/pg). Joins deploy_default (Caddy, valhalla).
+# Lives at /opt/mikeos-trips-cloud on 242 (this file copied there as docker-compose.yml, build context = repo root).
+# .env (mode 600, never in git): TRIPS_DB_PASSWORD=...
+services:
+  mikeos-trips-db:
+    image: postgres:18
+    container_name: mikeos-trips-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trips
+      POSTGRES_PASSWORD: ${TRIPS_DB_PASSWORD:?set in .env}
+      POSTGRES_DB: mikeos_trips
+    volumes:
+      - /data/mikeos-trips/pg:/var/lib/postgresql
+    networks: [deploy_default]
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trips -d mikeos_trips"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mikeos-trips:
+    build: .
+    image: mikeos-trips:latest
+    container_name: mikeos-trips
+    restart: unless-stopped
+    depends_on:
+      mikeos-trips-db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://trips:${TRIPS_DB_PASSWORD}@mikeos-trips-db:5432/mikeos_trips
+      TRIPS_SCHEMA: trips
+      MIKEOSCOMPUTERS_URL: https://account.osmike.com
+      ACCOUNT_OSMIKE_ISSUER: https://account.osmike.com
+      # Local Valhalla over the docker network (no Caddy hop, no token needed inside the network).
+      VALHALLA_URL: http://valhalla:8002
+      SERVED_BY: hetzner-242
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [deploy_default]
+    mem_limit: 512m
+    cpus: 1.0
+
+networks:
+  deploy_default:
+    external: true

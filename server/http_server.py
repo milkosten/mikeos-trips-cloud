@@ -327,6 +327,8 @@ async def health():
         "status": "healthy" if db_ok else "degraded",
         "db": "up" if db_ok else "down",
         "version": VERSION,
+        # Where this answer came from (set SERVED_BY on the host, e.g. "hetzner-242"); empty if unset.
+        "served_by": os.environ.get("SERVED_BY", ""),
     }
 
 
