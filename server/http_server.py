@@ -32,7 +32,6 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from server.rate_limit import PublicRateLimitMiddleware
 from server.identity import authenticate, resolve_agent_key
 from server.storage.postgres_manager import get_postgres_manager
 
@@ -294,7 +293,6 @@ app = FastAPI(
     version=VERSION,
     lifespan=lifespan,
 )
-app.add_middleware(PublicRateLimitMiddleware)
 
 
 # ---------------------------------------------------------------------------
