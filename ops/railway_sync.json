@@ -1,0 +1,12 @@
+{
+  "service": "trips",
+  "railway": {"project": "3b8ca97f-02e6-497f-b455-1d265da3c900", "environment": "91f5c948-6fd1-4d6b-b8e9-59bc550f4126",
+              "postgres_service": "Postgres", "database": "railway"},
+  "target": {"container": "mikeos-trips-db", "user": "trips", "database": "mikeos_trips"},
+  "tables": [
+    {"src": "trips.journeys"},
+    {"src": "trips.samples"},
+    {"src": "trips.searches"},
+    {"src": "trips.interactions"}
+  ]
+}
