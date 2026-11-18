@@ -504,7 +504,7 @@ class PostgreSQLManager:
     # Read views for trips.osmike.com (owner-scoped; added 2026-11-18)
     # =========================================================================
 
-    # Per-journey stats from the samples: first/last sample time, count, driven km (haversine between consecutive
+    # Per-journey stats from the samples: first/last sample time + position, count, driven km (haversine between consecutive
     # samples, implausible jumps > 250 km/h dropped), top speed. $1 = user_id, $2 = journey ids (uuid[]).
     _STATS_SQL = """
         WITH s AS (
@@ -514,7 +514,7 @@ class PostgreSQLManager:
             WHERE j.user_id = $1 AND x.journey_id = ANY($2::uuid[])
             WINDOW w AS (PARTITION BY x.journey_id ORDER BY x.ts, x.id)
         ), d AS (
-            SELECT journey_id, ts, speed_kmh,
+            SELECT journey_id, ts, speed_kmh, lat, lon,
                    CASE WHEN plat IS NULL THEN 0.0 ELSE 2 * 6371.0088 * asin(least(1.0, sqrt(
                        power(sin(radians(lat - plat) / 2), 2) +
                        cos(radians(plat)) * cos(radians(lat)) * power(sin(radians(lon - plon) / 2), 2)))) END AS km,
@@ -523,6 +523,8 @@ class PostgreSQLManager:
         )
         SELECT journey_id,
                min(ts) AS first_ts, max(ts) AS last_ts, count(*) AS n, max(speed_kmh) AS max_kmh,
+               (array_agg(lat ORDER BY ts))[1] AS first_lat, (array_agg(lon ORDER BY ts))[1] AS first_lon,
+               (array_agg(lat ORDER BY ts DESC))[1] AS last_lat, (array_agg(lon ORDER BY ts DESC))[1] AS last_lon,
                coalesce(sum(CASE WHEN dt IS NULL THEN km
                                  WHEN dt <= 0 THEN (CASE WHEN km < 0.05 THEN km ELSE 0 END)
                                  WHEN km / (dt / 3600.0) < 250 THEN km ELSE 0 END), 0) AS driven_km
@@ -543,6 +545,8 @@ class PostgreSQLManager:
                 "sample_count": int(r["n"] or 0),
                 "driven_km": round(float(r["driven_km"] or 0.0), 3),
                 "max_kmh": round(float(r["max_kmh"]), 1) if r["max_kmh"] is not None else None,
+                "first_lat": r["first_lat"], "first_lon": r["first_lon"],
+                "last_lat": r["last_lat"], "last_lon": r["last_lon"],
             }
         return out
 
