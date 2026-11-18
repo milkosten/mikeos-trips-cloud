@@ -500,6 +500,118 @@ class PostgreSQLManager:
     # Row mappers
     # =========================================================================
 
+    # =========================================================================
+    # Read views for trips.osmike.com (owner-scoped; added 2026-11-18)
+    # =========================================================================
+
+    # Per-journey stats from the samples: first/last sample time, count, driven km (haversine between consecutive
+    # samples, implausible jumps > 250 km/h dropped), top speed. $1 = user_id, $2 = journey ids (uuid[]).
+    _STATS_SQL = """
+        WITH s AS (
+            SELECT x.journey_id, x.ts, x.lat, x.lon, x.speed_kmh,
+                   lag(x.lat) OVER w AS plat, lag(x.lon) OVER w AS plon, lag(x.ts) OVER w AS pts
+            FROM {schema}.samples x JOIN {schema}.journeys j ON j.id = x.journey_id
+            WHERE j.user_id = $1 AND x.journey_id = ANY($2::uuid[])
+            WINDOW w AS (PARTITION BY x.journey_id ORDER BY x.ts, x.id)
+        ), d AS (
+            SELECT journey_id, ts, speed_kmh,
+                   CASE WHEN plat IS NULL THEN 0.0 ELSE 2 * 6371.0088 * asin(least(1.0, sqrt(
+                       power(sin(radians(lat - plat) / 2), 2) +
+                       cos(radians(plat)) * cos(radians(lat)) * power(sin(radians(lon - plon) / 2), 2)))) END AS km,
+                   extract(epoch FROM ts - pts) AS dt
+            FROM s
+        )
+        SELECT journey_id,
+               min(ts) AS first_ts, max(ts) AS last_ts, count(*) AS n, max(speed_kmh) AS max_kmh,
+               coalesce(sum(CASE WHEN dt IS NULL THEN km
+                                 WHEN dt <= 0 THEN (CASE WHEN km < 0.05 THEN km ELSE 0 END)
+                                 WHEN km / (dt / 3600.0) < 250 THEN km ELSE 0 END), 0) AS driven_km
+        FROM d GROUP BY journey_id
+    """
+
+    async def journey_stats(self, user_id: str, ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        if not ids:
+            return {}
+        pool = await self.get_connection()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(self._STATS_SQL.format(schema=self.schema), user_id, ids)
+        out = {}
+        for r in rows:
+            out[str(r["journey_id"])] = {
+                "first_sample_at": r["first_ts"].isoformat() if r["first_ts"] else None,
+                "last_sample_at": r["last_ts"].isoformat() if r["last_ts"] else None,
+                "sample_count": int(r["n"] or 0),
+                "driven_km": round(float(r["driven_km"] or 0.0), 3),
+                "max_kmh": round(float(r["max_kmh"]), 1) if r["max_kmh"] is not None else None,
+            }
+        return out
+
+    async def list_journeys_page(self, user_id: str, limit: int = 50, before: Optional[datetime] = None,
+                                 with_stats: bool = False) -> List[Dict[str, Any]]:
+        """Journeys newest-started first, optionally before a started_at cursor, optionally with sample stats."""
+        pool = await self.get_connection()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""SELECT * FROM {self.schema}.journeys
+                    WHERE user_id = $1 AND ($2::timestamptz IS NULL OR started_at < $2)
+                    ORDER BY started_at DESC LIMIT $3""",
+                user_id, before, max(1, min(limit, 200)))
+        out = [self._row_to_journey(r) for r in rows]
+        if with_stats:
+            stats = await self.journey_stats(user_id, [j["id"] for j in out])
+            for j in out:
+                j["stats"] = stats.get(j["id"]) or {"sample_count": 0, "driven_km": 0.0, "max_kmh": None,
+                                                    "first_sample_at": None, "last_sample_at": None}
+        return out
+
+    async def journey_samples(self, user_id: str, journey_id: str, limit: int = 20000) -> Optional[List[Dict[str, Any]]]:
+        """The samples of one journey the user owns, in time order. None if the journey isn't theirs."""
+        if not await self.owns_journey(user_id, journey_id):
+            return None
+        pool = await self.get_connection()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""SELECT lat, lon, speed_kmh, ts, eta_min, remaining_km FROM {self.schema}.samples
+                    WHERE journey_id = $1::uuid ORDER BY ts, id LIMIT $2""",
+                journey_id, max(1, min(limit, 20000)))
+        return [{"lat": r["lat"], "lon": r["lon"], "speed_kmh": r["speed_kmh"],
+                 "ts": r["ts"].isoformat() if r["ts"] else None,
+                 "eta_min": r["eta_min"], "remaining_km": r["remaining_km"]} for r in rows]
+
+    async def month_totals(self, user_id: str, tz: str = "Europe/Stockholm") -> List[Dict[str, Any]]:
+        """Per calendar month (in tz): drives, driven km (from samples, else the planned km) and minutes
+        (first to last sample, else started_at to ended_at). Newest month first."""
+        pool = await self.get_connection()
+        async with pool.acquire() as conn:
+            ids = [str(r["id"]) for r in await conn.fetch(
+                f"SELECT id FROM {self.schema}.journeys WHERE user_id = $1", user_id)]
+            rows = await conn.fetch(
+                f"SELECT id, km, started_at, ended_at FROM {self.schema}.journeys WHERE user_id = $1", user_id)
+        stats = await self.journey_stats(user_id, ids)
+        try:
+            from zoneinfo import ZoneInfo
+            zone = ZoneInfo(tz)
+        except Exception:
+            from zoneinfo import ZoneInfo
+            zone = ZoneInfo("Europe/Stockholm")
+        months: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            st = stats.get(str(r["id"])) or {}
+            first = _parse_ts(st.get("first_sample_at")) or r["started_at"]
+            last = _parse_ts(st.get("last_sample_at")) if st.get("first_sample_at") else r["ended_at"]
+            km = st.get("driven_km") if st.get("sample_count", 0) > 1 else (r["km"] or 0.0)
+            minutes = (last - first).total_seconds() / 60.0 if (first and last and last >= first) else 0.0
+            key = first.astimezone(zone).strftime("%Y-%m") if first else "unknown"
+            m = months.setdefault(key, {"month": key, "drives": 0, "km": 0.0, "minutes": 0.0})
+            m["drives"] += 1
+            m["km"] += float(km or 0.0)
+            m["minutes"] += minutes
+        out = sorted(months.values(), key=lambda m: m["month"], reverse=True)
+        for m in out:
+            m["km"] = round(m["km"], 2)
+            m["minutes"] = round(m["minutes"], 1)
+        return out
+
     @staticmethod
     def _row_to_journey(r) -> Dict[str, Any]:
         return {

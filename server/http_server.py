@@ -20,11 +20,15 @@ Endpoints:
   POST /api/trips/{id}/samples           -> batch add samples {stored: N}
   POST /api/trips/{id}/end               -> end a journey  {trip_id,duration_min,sample_count,avg_kmh}
   GET  /api/trips/{id}                   -> a journey + sample_count
-  GET  /api/trips?limit=20               -> recent journeys for the user
+  GET  /api/trips?limit=20               -> recent journeys for the user (&before=ISO &stats=1 optional)
+  GET  /api/trips/months?tz=             -> monthly totals (drives, km, minutes)
+  GET  /api/trips/{id}/samples           -> one journey's samples, oldest first (+ stats)
   GET  /api/congestion?lat=&lon=&radius_m=&hour=  -> the congestion model
 """
 import os
 import logging
+import uuid
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Union
 
@@ -469,12 +473,48 @@ async def end_trip(
     return result
 
 
+def _trip_id_or_404(trip_id: str) -> str:
+    """A malformed id is the same 404 as someone else's id (no 500 from the ::uuid cast)."""
+    try:
+        return str(uuid.UUID(trip_id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+
+@app.get("/api/trips/months")
+async def trip_months(
+    tz: str = Query(default="Europe/Stockholm", max_length=64),
+    user_id: str = Depends(current_user_id),
+) -> Dict[str, Any]:
+    """Monthly totals for the user: drives, driven km, minutes (month boundaries in `tz`)."""
+    db = await get_postgres_manager()
+    months = await db.month_totals(user_id, tz=tz)
+    return {"months": months, "count": len(months)}
+
+
+@app.get("/api/trips/{trip_id}/samples")
+async def trip_samples(
+    trip_id: str,
+    limit: int = Query(default=20000, ge=1, le=20000),
+    user_id: str = Depends(current_user_id),
+) -> Dict[str, Any]:
+    """The speed/GPS samples of one journey the caller owns, oldest first (+ stats). Not theirs -> 404."""
+    trip_id = _trip_id_or_404(trip_id)
+    db = await get_postgres_manager()
+    samples = await db.journey_samples(user_id, trip_id, limit=limit)
+    if samples is None:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    stats = (await db.journey_stats(user_id, [trip_id])).get(trip_id)
+    return {"trip_id": trip_id, "samples": samples, "count": len(samples), "stats": stats}
+
+
 @app.get("/api/trips/{trip_id}")
 async def get_trip(
     trip_id: str,
     user_id: str = Depends(current_user_id),
 ) -> Dict[str, Any]:
     """A journey plus its sample_count (scoped to the user)."""
+    trip_id = _trip_id_or_404(trip_id)
     db = await get_postgres_manager()
     journey = await db.get_journey(user_id, trip_id)
     if journey is None:
@@ -485,11 +525,28 @@ async def get_trip(
 @app.get("/api/trips")
 async def list_trips(
     limit: int = Query(default=20, ge=1, le=200),
+    before: Optional[str] = Query(default=None, max_length=64),
+    stats: bool = Query(default=False),
     user_id: str = Depends(current_user_id),
 ) -> Dict[str, Any]:
-    """Recent journeys for the user, newest-started first."""
+    """Recent journeys for the user, newest-started first.
+
+    Optional (trips.osmike.com): `before=<ISO started_at>` pages older journeys, `stats=1` adds per-journey
+    sample stats (first/last sample time, count, driven km, top speed). Without them the answer is unchanged.
+    """
     db = await get_postgres_manager()
-    journeys = await db.list_journeys(user_id, limit=limit)
+    if before is None and not stats:
+        journeys = await db.list_journeys(user_id, limit=limit)
+        return {"trips": journeys, "count": len(journeys)}
+    cursor = None
+    if before:
+        try:
+            cursor = datetime.fromisoformat(before.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="before must be an ISO-8601 time")
+        if cursor.tzinfo is None:
+            cursor = cursor.replace(tzinfo=timezone.utc)
+    journeys = await db.list_journeys_page(user_id, limit=limit, before=cursor, with_stats=stats)
     return {"trips": journeys, "count": len(journeys)}
 
 
