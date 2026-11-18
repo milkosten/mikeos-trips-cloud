@@ -19,7 +19,9 @@ sample is scoped to the `user_id` resolved from the caller's hive agent key
 | POST | `/api/trips/{id}/samples` | key | batch add samples → `{stored: N}` |
 | POST | `/api/trips/{id}/end` | key | end → `{trip_id, duration_min, sample_count, avg_kmh}` |
 | GET  | `/api/trips/{id}` | key | a journey + `sample_count` |
-| GET  | `/api/trips?limit=20` | key | recent journeys |
+| GET  | `/api/trips?limit=20` | key | recent journeys (`&before=<ISO>` pages, `&stats=1` adds per-journey sample stats) |
+| GET  | `/api/trips/{id}/samples` | key | one journey's samples, oldest first (+ stats) |
+| GET  | `/api/trips/months?tz=` | key | monthly totals: drives, driven km, minutes |
 | GET  | `/api/congestion?lat=&lon=&radius_m=1500&hour=` | key | `{avg_kmh, sample_count, by_hour}` |
 
 `/api/route` body: `{"from":{"lat":..,"lon":..}, "to":{"lat":..,"lon":..}}`.
